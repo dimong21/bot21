@@ -1,5 +1,5 @@
 import asyncio
-import aiosqlite
+import sqlite3
 import random
 import time
 from datetime import datetime, timedelta
@@ -8,6 +8,60 @@ import vk_api
 from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
 from vk_api.keyboard import VkKeyboard, VkKeyboardColor
 from vk_api.utils import get_random_id
+import threading
+from queue import Queue
+import os
+
+class Database:
+    """Синхронный слой базы данных с асинхронной оберткой"""
+    
+    def __init__(self, db_path: str = 'apex_chat_manager.db'):
+        self.db_path = db_path
+        self.conn = None
+        self.cursor = None
+        self.lock = threading.Lock()
+        
+    def connect(self):
+        """Синхронное подключение к БД"""
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self.cursor = self.conn.cursor()
+        
+    def close(self):
+        """Закрытие соединения"""
+        if self.conn:
+            self.conn.close()
+    
+    def execute(self, query: str, params: tuple = ()):
+        """Синхронное выполнение запроса"""
+        with self.lock:
+            self.cursor.execute(query, params)
+            self.conn.commit()
+            return self.cursor
+    
+    def fetchone(self, query: str, params: tuple = ()):
+        """Синхронное получение одной записи"""
+        with self.lock:
+            self.cursor.execute(query, params)
+            return self.cursor.fetchone()
+    
+    def fetchall(self, query: str, params: tuple = ()):
+        """Синхронное получение всех записей"""
+        with self.lock:
+            self.cursor.execute(query, params)
+            return self.cursor.fetchall()
+    
+    async def execute_async(self, query: str, params: tuple = ()):
+        """Асинхронное выполнение запроса"""
+        return await asyncio.to_thread(self.execute, query, params)
+    
+    async def fetchone_async(self, query: str, params: tuple = ()):
+        """Асинхронное получение одной записи"""
+        return await asyncio.to_thread(self.fetchone, query, params)
+    
+    async def fetchall_async(self, query: str, params: tuple = ()):
+        """Асинхронное получение всех записей"""
+        return await asyncio.to_thread(self.fetchall, query, params)
 
 class ApexChatManager:
     def __init__(self, token: str, group_id: int):
@@ -43,14 +97,16 @@ class ApexChatManager:
         }
         
         # Инициализация базы данных
-        self.init_db_task = None
+        self.db = Database()
+        self.db.connect()
         
-    async def init_db(self):
-        """Асинхронная инициализация базы данных"""
-        self.conn = await aiosqlite.connect('apex_chat_manager.db')
+        # Запуск фоновых задач
+        self.background_tasks = []
         
+    def init_db(self):
+        """Инициализация базы данных"""
         # Пользователи
-        await self.conn.execute('''
+        self.db.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY,
                 first_name TEXT,
@@ -73,7 +129,7 @@ class ApexChatManager:
         ''')
         
         # Чаты
-        await self.conn.execute('''
+        self.db.execute('''
             CREATE TABLE IF NOT EXISTS chats (
                 id INTEGER PRIMARY KEY,
                 name TEXT,
@@ -82,7 +138,7 @@ class ApexChatManager:
         ''')
         
         # Баны
-        await self.conn.execute('''
+        self.db.execute('''
             CREATE TABLE IF NOT EXISTS bans (
                 user_id INTEGER,
                 chat_id INTEGER,
@@ -95,7 +151,7 @@ class ApexChatManager:
         ''')
         
         # Муты
-        await self.conn.execute('''
+        self.db.execute('''
             CREATE TABLE IF NOT EXISTS mutes (
                 user_id INTEGER,
                 chat_id INTEGER,
@@ -106,7 +162,7 @@ class ApexChatManager:
         ''')
         
         # Роли
-        await self.conn.execute('''
+        self.db.execute('''
             CREATE TABLE IF NOT EXISTS roles (
                 user_id INTEGER,
                 chat_id INTEGER,
@@ -117,7 +173,7 @@ class ApexChatManager:
         ''')
         
         # Доступные роли
-        await self.conn.execute('''
+        self.db.execute('''
             CREATE TABLE IF NOT EXISTS available_roles (
                 chat_id INTEGER,
                 role_name TEXT,
@@ -127,7 +183,7 @@ class ApexChatManager:
         ''')
         
         # Агенты
-        await self.conn.execute('''
+        self.db.execute('''
             CREATE TABLE IF NOT EXISTS agents (
                 user_id INTEGER PRIMARY KEY,
                 agent_number INTEGER,
@@ -136,7 +192,7 @@ class ApexChatManager:
         ''')
         
         # Квесты
-        await self.conn.execute('''
+        self.db.execute('''
             CREATE TABLE IF NOT EXISTS quests (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 chat_id INTEGER,
@@ -150,7 +206,7 @@ class ApexChatManager:
         ''')
         
         # Тикеты
-        await self.conn.execute('''
+        self.db.execute('''
             CREATE TABLE IF NOT EXISTS tickets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 chat_id INTEGER,
@@ -164,7 +220,7 @@ class ApexChatManager:
         ''')
         
         # Магазин
-        await self.conn.execute('''
+        self.db.execute('''
             CREATE TABLE IF NOT EXISTS shop_items (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 category TEXT,
@@ -176,7 +232,7 @@ class ApexChatManager:
         ''')
         
         # Статистика сообщений
-        await self.conn.execute('''
+        self.db.execute('''
             CREATE TABLE IF NOT EXISTS message_stats (
                 user_id INTEGER,
                 chat_id INTEGER,
@@ -189,7 +245,7 @@ class ApexChatManager:
         ''')
         
         # Рабы
-        await self.conn.execute('''
+        self.db.execute('''
             CREATE TABLE IF NOT EXISTS slaves (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 owner_id INTEGER,
@@ -207,7 +263,7 @@ class ApexChatManager:
         ''')
         
         # Системные баны
-        await self.conn.execute('''
+        self.db.execute('''
             CREATE TABLE IF NOT EXISTS sys_bans (
                 user_id INTEGER PRIMARY KEY,
                 reason TEXT,
@@ -217,7 +273,7 @@ class ApexChatManager:
         ''')
         
         # Никнеймы
-        await self.conn.execute('''
+        self.db.execute('''
             CREATE TABLE IF NOT EXISTS nicknames (
                 user_id INTEGER,
                 chat_id INTEGER,
@@ -227,7 +283,7 @@ class ApexChatManager:
         ''')
         
         # Команды
-        await self.conn.execute('''
+        self.db.execute('''
             CREATE TABLE IF NOT EXISTS commands (
                 name TEXT PRIMARY KEY,
                 level INTEGER DEFAULT 0,
@@ -235,44 +291,37 @@ class ApexChatManager:
             )
         ''')
         
-        await self.conn.commit()
-        
         # Загрузка уровней команд
-        cursor = await self.conn.execute('SELECT name, level FROM commands')
-        async for row in cursor:
+        rows = self.db.fetchall('SELECT name, level FROM commands')
+        for row in rows:
             self.command_levels[row[0]] = row[1]
     
     async def get_user(self, user_id: int, chat_id: int = None) -> Dict:
         """Получение данных пользователя"""
-        cursor = await self.conn.execute('SELECT * FROM users WHERE id = ?', (user_id,))
-        user = await cursor.fetchone()
+        user = await self.db.fetchone_async('SELECT * FROM users WHERE id = ?', (user_id,))
         
         if not user:
-            await self.conn.execute('''
+            await self.db.execute_async('''
                 INSERT INTO users (id, last_mining)
                 VALUES (?, ?)
             ''', (user_id, datetime.now().isoformat()))
-            await self.conn.commit()
             
-            cursor = await self.conn.execute('SELECT * FROM users WHERE id = ?', (user_id,))
-            user = await cursor.fetchone()
+            user = await self.db.fetchone_async('SELECT * FROM users WHERE id = ?', (user_id,))
         
         # Получение роли в чате
         role = None
         role_level = 0
         if chat_id:
-            cursor = await self.conn.execute(
+            role_data = await self.db.fetchone_async(
                 'SELECT role, level FROM roles WHERE user_id = ? AND chat_id = ?',
                 (user_id, chat_id)
             )
-            role_data = await cursor.fetchone()
             if role_data:
                 role = role_data[0]
                 role_level = role_data[1]
         
         # Проверка агента
-        cursor = await self.conn.execute('SELECT agent_number FROM agents WHERE user_id = ?', (user_id,))
-        agent = await cursor.fetchone()
+        agent = await self.db.fetchone_async('SELECT agent_number FROM agents WHERE user_id = ?', (user_id,))
         
         return {
             'id': user[0],
@@ -301,16 +350,16 @@ class ApexChatManager:
     async def check_permission(self, user_id: int, chat_id: int, command: str) -> bool:
         """Проверка прав доступа к команде"""
         # Проверка системного бана
-        cursor = await self.conn.execute('SELECT 1 FROM sys_bans WHERE user_id = ?', (user_id,))
-        if await cursor.fetchone():
+        sys_ban = await self.db.fetchone_async('SELECT 1 FROM sys_bans WHERE user_id = ?', (user_id,))
+        if sys_ban:
             return False
         
         # Проверка бана в чате
-        cursor = await self.conn.execute(
+        ban = await self.db.fetchone_async(
             'SELECT 1 FROM bans WHERE user_id = ? AND chat_id = ?',
             (user_id, chat_id)
         )
-        if await cursor.fetchone():
+        if ban:
             return False
         
         required_level = self.command_levels.get(command, 0)
@@ -331,16 +380,15 @@ class ApexChatManager:
             return 100
         
         # Проверка на агента
-        cursor = await self.conn.execute('SELECT 1 FROM agents WHERE user_id = ?', (user_id,))
-        if await cursor.fetchone():
+        agent = await self.db.fetchone_async('SELECT 1 FROM agents WHERE user_id = ?', (user_id,))
+        if agent:
             return 50
         
         # Проверка роли
-        cursor = await self.conn.execute(
+        role = await self.db.fetchone_async(
             'SELECT level FROM roles WHERE user_id = ? AND chat_id = ?',
             (user_id, chat_id)
         )
-        role = await cursor.fetchone()
         if role:
             return role[0]
         
@@ -358,7 +406,10 @@ class ApexChatManager:
     async def is_vk_admin(self, user_id: int, chat_id: int) -> bool:
         """Проверка администратора ВКонтакте"""
         try:
-            members = self.vk.messages.getConversationMembers(peer_id=chat_id)
+            members = await asyncio.to_thread(
+                self.vk.messages.getConversationMembers,
+                peer_id=chat_id
+            )
             for member in members['items']:
                 if member['member_id'] == user_id:
                     if member.get('is_admin') or member.get('is_owner'):
@@ -369,7 +420,8 @@ class ApexChatManager:
     
     async def send_message(self, peer_id: int, message: str, keyboard=None, attachment=None):
         """Отправка сообщения"""
-        self.vk.messages.send(
+        await asyncio.to_thread(
+            self.vk.messages.send,
             peer_id=peer_id,
             message=message,
             keyboard=keyboard.get_keyboard() if keyboard else None,
@@ -383,9 +435,9 @@ class ApexChatManager:
         """Помощь по командам"""
         help_text = """📚 **Apex × Чат-менеджер**
 
-🔗 **Ссылка на сообщество:** https://vk.com/apexchatmanager
+🔗 **Сообщество:** https://vk.com/apexchatmanager
 
-📖 **Полный список команд:** [Нажмите для просмотра](https://vk.com/apexchatmanager?w=page-123456_123456)
+📖 **Полный список команд:** https://vk.com/apexchatmanager
 
 **Основные команды:**
 🎮 **Игровые:** /balance, /shop, /buy, /mine, /slave
@@ -421,11 +473,10 @@ class ApexChatManager:
             return
         
         # Обновление уровня команды
-        await self.conn.execute(
+        await self.db.execute_async(
             'INSERT OR REPLACE INTO commands (name, level) VALUES (?, ?)',
             (command, level)
         )
-        await self.conn.commit()
         
         self.command_levels[command] = level
         
@@ -457,11 +508,10 @@ class ApexChatManager:
             return
         
         # Добавление роли
-        await self.conn.execute(
+        await self.db.execute_async(
             'INSERT OR REPLACE INTO available_roles (chat_id, role_name, required_level) VALUES (?, ?, ?)',
             (chat_id, role_name, level)
         )
-        await self.conn.commit()
         
         await self.send_message(
             chat_id,
@@ -485,11 +535,10 @@ class ApexChatManager:
         role_name = args[1]
         
         # Получение уровня роли
-        cursor = await self.conn.execute(
+        role_data = await self.db.fetchone_async(
             'SELECT required_level FROM available_roles WHERE chat_id = ? AND role_name = ?',
             (chat_id, role_name)
         )
-        role_data = await cursor.fetchone()
         
         if not role_data:
             await self.send_message(chat_id, f"❌ Роль {role_name} не существует!")
@@ -498,16 +547,38 @@ class ApexChatManager:
         role_level = role_data[0]
         
         # Выдача роли
-        await self.conn.execute(
+        await self.db.execute_async(
             'INSERT OR REPLACE INTO roles (user_id, chat_id, role, level) VALUES (?, ?, ?, ?)',
             (target_id, chat_id, role_name, role_level)
         )
-        await self.conn.commit()
         
         await self.send_message(
             chat_id,
             f"✅ Пользователю [id{target_id}|] выдана роль: {role_name}"
         )
+    
+    async def cmd_ping(self, event, user_id: int, chat_id: int, args: List[str]):
+        """Пинг бота"""
+        start = time.time()
+        await self.send_message(chat_id, "🏓 Понг!")
+        end = time.time()
+        print(f"Ping: {end - start} сек")
+    
+    async def cmd_botstats(self, event, user_id: int, chat_id: int, args: List[str]):
+        """Статистика бота"""
+        users_count = await self.db.fetchone_async('SELECT COUNT(*) FROM users')
+        chats_count = await self.db.fetchone_async('SELECT COUNT(*) FROM chats')
+        
+        stats_text = f"""📊 **Статистика Apex × Чат-менеджер**
+
+👥 Пользователей: {users_count[0]}
+💬 Чатов: {chats_count[0]}
+⚡ Версия: 2.0.0
+🕒 Статус: 🟢 Работает
+
+🔗 Сообщество: https://vk.com/apexchatmanager"""
+        
+        await self.send_message(chat_id, stats_text)
     
     # ==================== СИСТЕМА РАБОВ ====================
     
@@ -546,32 +617,31 @@ class ApexChatManager:
             return
         
         # Проверка, не является ли пользователь уже рабом
-        cursor = await self.conn.execute(
+        existing = await self.db.fetchone_async(
             'SELECT 1 FROM slaves WHERE slave_id = ?',
             (slave_id,)
         )
-        if await cursor.fetchone():
+        if existing:
             await self.send_message(chat_id, "❌ Этот пользователь уже является чьим-то рабом!")
             return
         
         # Получение информации о пользователе
         try:
-            user_info = self.vk.users.get(user_ids=slave_id)[0]
-            slave_name = f"{user_info['first_name']} {user_info['last_name']}"
+            user_info = await asyncio.to_thread(self.vk.users.get, user_ids=slave_id)
+            slave_name = f"{user_info[0]['first_name']} {user_info[0]['last_name']}"
         except:
             slave_name = f"Пользователь {slave_id}"
         
         # Покупка раба
-        await self.conn.execute('''
+        await self.db.execute_async('''
             INSERT INTO slaves (owner_id, slave_id, name, price, bought_at)
             VALUES (?, ?, ?, ?, ?)
         ''', (user_id, slave_id, slave_name, price, datetime.now().isoformat()))
         
-        await self.conn.execute(
+        await self.db.execute_async(
             'UPDATE users SET rubles = rubles - ? WHERE id = ?',
             (price, user_id)
         )
-        await self.conn.commit()
         
         await self.send_message(
             chat_id,
@@ -583,11 +653,10 @@ class ApexChatManager:
     
     async def show_slaves_list(self, user_id: int, chat_id: int):
         """Показать список рабов"""
-        cursor = await self.conn.execute(
+        slaves = await self.db.fetchall_async(
             'SELECT * FROM slaves WHERE owner_id = ?',
             (user_id,)
         )
-        slaves = await cursor.fetchall()
         
         if not slaves:
             await self.send_message(chat_id, "📭 У вас нет рабов! Купите раба через /slave [пользователь] [цена]")
@@ -602,7 +671,7 @@ class ApexChatManager:
             chains = slave[7]
             price = slave[8]
             
-            chain_emoji = "⛓️" * chains if chains else "🔗"
+            chain_emoji = "⛓️" * min(chains, 5) if chains else "🔗"
             
             text += f"{i}. {name}\n"
             text += f"   🧬 Уровень: {level} | Работа: {work_type}\n"
@@ -625,11 +694,10 @@ class ApexChatManager:
         work_type = args[1] if len(args) > 1 else 'miner'
         
         # Поиск раба
-        cursor = await self.conn.execute(
+        slave = await self.db.fetchone_async(
             'SELECT * FROM slaves WHERE owner_id = ? AND name LIKE ?',
             (user_id, f'%{slave_name}%')
         )
-        slave = await cursor.fetchone()
         
         if not slave:
             await self.send_message(chat_id, "❌ Раб не найден!")
@@ -669,30 +737,29 @@ class ApexChatManager:
         
         if new_exp >= slave_level * 100:
             new_level = slave_level + 1
-            await self.conn.execute(
+            await self.db.execute_async(
                 'UPDATE slaves SET level = ?, exp = ? WHERE id = ?',
                 (new_level, new_exp - slave_level * 100, slave_id)
             )
             level_up_text = f"\n✨ Раб повысил уровень до {new_level}!"
         else:
-            await self.conn.execute(
+            await self.db.execute_async(
                 'UPDATE slaves SET exp = ? WHERE id = ?',
                 (new_exp, slave_id)
             )
             level_up_text = ""
         
         # Обновление баланса владельца
-        await self.conn.execute(
+        await self.db.execute_async(
             'UPDATE users SET rubles = rubles + ? WHERE id = ?',
             (earn, user_id)
         )
         
         # Обновление времени работы
-        await self.conn.execute(
+        await self.db.execute_async(
             'UPDATE slaves SET last_work = ?, work_type = ? WHERE id = ?',
             (datetime.now().isoformat(), work_type, slave_id)
         )
-        await self.conn.commit()
         
         await self.send_message(
             chat_id,
@@ -718,25 +785,22 @@ class ApexChatManager:
             return
         
         # Поиск раба
-        cursor = await self.conn.execute(
+        slave = await self.db.fetchone_async(
             'SELECT * FROM slaves WHERE owner_id = ? AND name LIKE ?',
             (user_id, f'%{slave_name}%')
         )
-        slave = await cursor.fetchone()
         
         if not slave:
             await self.send_message(chat_id, "❌ Раб не найден!")
             return
         
         slave_id = slave[0]
-        slave_user_id = slave[2]
         
         # Обновление цены
-        await self.conn.execute(
+        await self.db.execute_async(
             'UPDATE slaves SET price = ? WHERE id = ?',
             (price, slave_id)
         )
-        await self.conn.commit()
         
         await self.send_message(
             chat_id,
@@ -763,11 +827,10 @@ class ApexChatManager:
             return
         
         # Поиск раба
-        cursor = await self.conn.execute(
+        slave = await self.db.fetchone_async(
             'SELECT * FROM slaves WHERE owner_id = ? AND name LIKE ?',
             (user_id, f'%{slave_name}%')
         )
-        slave = await cursor.fetchone()
         
         if not slave:
             await self.send_message(chat_id, "❌ Раб не найден!")
@@ -787,19 +850,18 @@ class ApexChatManager:
                 )
                 return
             
-            await self.conn.execute(
+            await self.db.execute_async(
                 'UPDATE users SET rubles = rubles - ? WHERE id = ?',
                 (cost, user_id)
             )
         
         # Обновление цепей
-        await self.conn.execute(
+        await self.db.execute_async(
             'UPDATE slaves SET chains = ? WHERE id = ?',
             (chains, slave_id)
         )
-        await self.conn.commit()
         
-        chain_emoji = "⛓️" * chains if chains else "🔗"
+        chain_emoji = "⛓️" * min(chains, 5) if chains else "🔗"
         
         await self.send_message(
             chat_id,
@@ -843,20 +905,19 @@ class ApexChatManager:
         
         # Получение информации о пользователе
         try:
-            user_info = self.vk.users.get(user_ids=target_id)[0]
-            first_name = user_info['first_name']
-            last_name = user_info['last_name']
+            user_info = await asyncio.to_thread(self.vk.users.get, user_ids=target_id)
+            first_name = user_info[0]['first_name']
+            last_name = user_info[0]['last_name']
         except:
             first_name = user_data['first_name']
             last_name = user_data['last_name']
         
         # Статистика сообщений
         today = datetime.now().strftime('%Y-%m-%d')
-        cursor = await self.conn.execute('''
+        stats = await self.db.fetchone_async('''
             SELECT messages, bad_words FROM message_stats
             WHERE user_id = ? AND chat_id = ? AND date = ?
         ''', (target_id, chat_id, today))
-        stats = await cursor.fetchone()
         
         messages_today = stats[0] if stats else 0
         bad_words_today = stats[1] if stats else 0
@@ -866,13 +927,19 @@ class ApexChatManager:
         if user_data['is_agent']:
             agent_text = f"\n🐩 Агент поддержки №{user_data['agent_number']}"
         
+        # Проверка бана
+        ban = await self.db.fetchone_async(
+            'SELECT 1 FROM bans WHERE user_id = ? AND chat_id = ?',
+            (target_id, chat_id)
+        )
+        
         text = f"""🔍 **Информация о пользователе:**
 
 🗣 Статус: {user_data['role'] or 'Участник'}{agent_text}
 📊 Сообщений сегодня: {messages_today}
 ⚠ Предупреждений: {user_data['warns']}/3
 📄 Никнейм: {first_name} {last_name}
-🚧 Блокировка: {'Да' if await self.is_banned(target_id, chat_id) else 'Нет'}
+🚧 Блокировка: {'Да' if ban else 'Нет'}
 
 📋 **Глобальная информация:**
 💎 VIP статус: {user_data['vip_status']}
@@ -887,49 +954,47 @@ class ApexChatManager:
         """Топ пользователей"""
         category = args[0].lower() if args else 'money'
         
-        if category == 'money':
-            cursor = await self.conn.execute('''
+        if category == 'money' or category == 'деньги':
+            rows = await self.db.fetchall_async('''
                 SELECT id, rubles + dollars*80 + euros*90 + bitcoins*5000000 as total
                 FROM users
                 ORDER BY total DESC
                 LIMIT 10
             ''')
-        elif category == 'bitcoin':
-            cursor = await self.conn.execute('''
+        elif category == 'bitcoin' or category == 'биткоин':
+            rows = await self.db.fetchall_async('''
                 SELECT id, bitcoins
                 FROM users
                 ORDER BY bitcoins DESC
                 LIMIT 10
             ''')
-        elif category == 'rating':
-            cursor = await self.conn.execute('''
+        elif category == 'rating' or category == 'рейтинг':
+            rows = await self.db.fetchall_async('''
                 SELECT id, rating
                 FROM users
                 ORDER BY rating DESC
                 LIMIT 10
             ''')
         else:
-            cursor = await self.conn.execute('''
+            rows = await self.db.fetchall_async('''
                 SELECT id, level
                 FROM users
                 ORDER BY level DESC
                 LIMIT 10
             ''')
         
-        top_users = await cursor.fetchall()
-        
         text = f"🏆 **Топ {category}:**\n\n"
-        for i, user in enumerate(top_users, 1):
-            user_id_top = user[0]
-            value = user[1]
+        for i, row in enumerate(rows, 1):
+            user_id_top = row[0]
+            value = row[1]
             
             try:
-                user_info = self.vk.users.get(user_ids=user_id_top)[0]
-                name = f"{user_info['first_name']} {user_info['last_name']}"
+                user_info = await asyncio.to_thread(self.vk.users.get, user_ids=user_id_top)
+                name = f"{user_info[0]['first_name']} {user_info[0]['last_name']}"
             except:
                 name = f"Пользователь {user_id_top}"
             
-            if category == 'bitcoin':
+            if category in ['bitcoin', 'биткоин']:
                 text += f"{i}. {name} — {value:.8f} BTC\n"
             else:
                 text += f"{i}. {name} — {value:.2f}\n"
@@ -958,17 +1023,44 @@ class ApexChatManager:
             earned = user_data['mining_speed']
         
         # Обновление баланса
-        await self.conn.execute('''
+        await self.db.execute_async('''
             UPDATE users SET bitcoins = bitcoins + ?, last_mining = ?
             WHERE id = ?
         ''', (earned, datetime.now().isoformat(), user_id))
-        await self.conn.commit()
         
         await self.send_message(
             chat_id,
             f"⛏️ Вы намайнили {earned:.8f} BTC!\n"
             f"💰 Текущий баланс: {user_data['bitcoins'] + earned:.8f} BTC"
         )
+    
+    async def cmd_shop(self, event, user_id: int, chat_id: int, args: List[str]):
+        """Магазин"""
+        keyboard = VkKeyboard(inline=True)
+        keyboard.add_button("🚘 Транспорт", color=VkKeyboardColor.PRIMARY)
+        keyboard.add_button("🏢 Недвижимость", color=VkKeyboardColor.PRIMARY)
+        keyboard.add_line()
+        keyboard.add_button("📱 Телефоны", color=VkKeyboardColor.SECONDARY)
+        keyboard.add_button("💻 Компьютеры", color=VkKeyboardColor.SECONDARY)
+        keyboard.add_line()
+        keyboard.add_button("🎖 Рейтинг", color=VkKeyboardColor.POSITIVE)
+        
+        text = """🛒 **Apex Shop**
+
+🚘 **Транспорт:**
+   — 🚗 автомобили (1000₽)
+   — 🚁 вертолеты (5000₽)
+   — ✈ самолеты (10000₽)
+
+🏢 **Недвижимость:**
+   — 🏡 дом (15000₽)
+
+📌 **Остальное:**
+   — 🎖 рейтинг (100₽ за 1 ед.)
+
+📥 Для покупки: /buy [категория] [номер]"""
+        
+        await self.send_message(chat_id, text, keyboard)
     
     # ==================== ВСПОМОГАТЕЛЬНЫЕ ====================
     
@@ -983,24 +1075,43 @@ class ApexChatManager:
         if mention.isdigit():
             return int(mention)
         
-        return int(mention) if mention.isdigit() else 0
+        return 0
     
-    async def is_banned(self, user_id: int, chat_id: int) -> bool:
-        """Проверка бана"""
-        cursor = await self.conn.execute(
-            'SELECT 1 FROM bans WHERE user_id = ? AND chat_id = ?',
-            (user_id, chat_id)
-        )
-        return await cursor.fetchone() is not None
+    async def update_message_stats(self, user_id: int, chat_id: int, text: str):
+        """Обновление статистики сообщений"""
+        today = datetime.now().strftime('%Y-%m-%d')
+        
+        await self.db.execute_async('''
+            INSERT INTO message_stats (user_id, chat_id, messages, date)
+            VALUES (?, ?, 1, ?)
+            ON CONFLICT(user_id, chat_id, date) DO UPDATE SET
+            messages = messages + 1
+        ''', (user_id, chat_id, today))
+        
+        # Обновление опыта
+        await self.db.execute_async('''
+            UPDATE users SET exp = exp + 1
+            WHERE id = ?
+        ''', (user_id,))
+        
+        # Проверка повышения уровня
+        user = await self.db.fetchone_async('SELECT level, exp FROM users WHERE id = ?', (user_id,))
+        
+        if user and user[1] >= user[0] * 100:
+            new_level = user[0] + 1
+            await self.db.execute_async(
+                'UPDATE users SET level = ?, exp = 0 WHERE id = ?',
+                (new_level, user_id)
+            )
+            await self.send_message(chat_id, f"🎉 Поздравляем! Вы достигли {new_level} уровня!")
     
     async def handle_command(self, event, text: str, user_id: int, chat_id: int):
         """Обработка команд"""
         # Проверка мута
-        cursor = await self.conn.execute(
+        mute = await self.db.fetchone_async(
             'SELECT until FROM mutes WHERE user_id = ? AND chat_id = ?',
             (user_id, chat_id)
         )
-        mute = await cursor.fetchone()
         if mute and datetime.fromisoformat(mute[0]) > datetime.now():
             return
         
@@ -1033,50 +1144,27 @@ class ApexChatManager:
                     'stats': self.cmd_stats,
                     'стата': self.cmd_stats,
                     'top': self.cmd_top,
+                    'топ': self.cmd_top,
                     'mine': self.cmd_mine,
                     'майнинг': self.cmd_mine,
+                    'ping': self.cmd_ping,
+                    'пинг': self.cmd_ping,
+                    'botstats': self.cmd_botstats,
+                    'статабота': self.cmd_botstats,
+                    'shop': self.cmd_shop,
+                    'магазин': self.cmd_shop,
                 }
                 
                 if cmd in commands:
                     await commands[cmd](event, user_id, chat_id, args)
                 return
     
-    async def update_message_stats(self, user_id: int, chat_id: int, text: str):
-        """Обновление статистики сообщений"""
-        today = datetime.now().strftime('%Y-%m-%d')
-        
-        await self.conn.execute('''
-            INSERT INTO message_stats (user_id, chat_id, messages, date)
-            VALUES (?, ?, 1, ?)
-            ON CONFLICT(user_id, chat_id, date) DO UPDATE SET
-            messages = messages + 1
-        ''', (user_id, chat_id, today))
-        
-        # Обновление опыта
-        await self.conn.execute('''
-            UPDATE users SET exp = exp + 1
-            WHERE id = ?
-        ''', (user_id,))
-        
-        # Проверка повышения уровня
-        cursor = await self.conn.execute('SELECT level, exp FROM users WHERE id = ?', (user_id,))
-        user = await cursor.fetchone()
-        
-        if user and user[1] >= user[0] * 100:
-            new_level = user[0] + 1
-            await self.conn.execute(
-                'UPDATE users SET level = ?, exp = 0 WHERE id = ?',
-                (new_level, user_id)
-            )
-            await self.send_message(chat_id, f"🎉 Поздравляем! Вы достигли {new_level} уровня!")
-        
-        await self.conn.commit()
-    
     async def run(self):
         """Запуск бота"""
-        await self.init_db()
+        self.init_db()
         print("🤖 Apex × Чат-менеджер запущен!")
         print("🔗 Сообщество: https://vk.com/apexchatmanager")
+        print("📊 База данных: SQLite (синхронная с асинхронной оберткой)")
         
         for event in self.longpoll.listen():
             if event.type == VkBotEventType.MESSAGE_NEW:
