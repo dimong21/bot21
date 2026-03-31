@@ -15,21 +15,22 @@ from datetime import datetime
 # ========== НАСТРОЙКИ ==========
 TOKEN = "vk1.a.KA15ljp23_4l6s3DomdeTkkE7DHmsflVzVWGMjBm7kzWm0eOATiZI_LTGXlzC2nnRHx3fcgjVivrqwUq5WUQN-7tfecpSfGfjjrhprbxh9B7WdUgpZ9sgKo5bYpLSzKmuahc3Ylf3Zysct7yvMch0FGoECKYe6gSGBerNJKsDIbAlndr9HzLcMojM7ePA5GdkZUCA4ICcV7ttTSHnqZUzQ"
 GROUP_ID = 237250582
-ADMIN_IDS = [771565937]       # ID пользователей, которые имеют все права
-WARN_LIMIT = 3                # количество варнов до бана
-WEB_PORT = 8080               # порт для страницы помощи
+ADMIN_IDS = [771565937]
+WARN_LIMIT = 3
+WEB_PORT = 8080
 # ================================
 
 vk_session = vk_api.VkApi(token=TOKEN)
 vk = vk_session.get_api()
 longpoll = VkLongPoll(vk_session)
 
-# ========== СТАТИСТИКА ДЛЯ /PING ==========
+# ========== СТАТИСТИКА ==========
 stats = {
     'start_time': time.time(),
-    'request_times': [],   # времена выполнения запросов к API (мс)
-    'command_times': [],   # времена выполнения команд (мс)
+    'request_times': [],
+    'command_times': [],
 }
+
 def add_request_time(t):
     stats['request_times'].append(t)
     if len(stats['request_times']) > 100:
@@ -41,7 +42,10 @@ def add_command_time(t):
         stats['command_times'] = stats['command_times'][-100:]
 
 # ========== БАЗА ДАННЫХ ==========
-conn = sqlite3.connect('chat_manager.db', check_same_thread=False)
+DB_PATH = '/app/data/chat_manager.db'
+os.makedirs('/app/data', exist_ok=True)
+
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 c = conn.cursor()
 
 # Создание всех таблиц
@@ -72,7 +76,7 @@ c.execute('''CREATE TABLE IF NOT EXISTS message_stats
 c.execute('''CREATE TABLE IF NOT EXISTS shop_items
              (item_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, price_rub INTEGER, price_dol INTEGER, price_eur INTEGER, description TEXT)''')
 
-# Добавляем стандартные предметы в магазин
+# Добавляем стандартные предметы
 c.execute("SELECT COUNT(*) FROM shop_items")
 if c.fetchone()[0] == 0:
     items = [
@@ -243,14 +247,17 @@ def unmute_user(user_id, chat_id):
 def get_user_link(user_id):
     return f"https://vk.com/id{user_id}"
 
-def send_message(chat_id, message, reply_to=None):
+def send_message(chat_id, message, reply_to=None, keyboard=None):
     start = time.time()
-    vk.messages.send(
-        peer_id=chat_id,
-        message=message,
-        random_id=0,
-        reply_to=reply_to
-    )
+    params = {
+        'peer_id': chat_id,
+        'message': message,
+        'random_id': 0,
+        'reply_to': reply_to
+    }
+    if keyboard:
+        params['keyboard'] = keyboard.get_keyboard()
+    vk.messages.send(**params)
     add_request_time((time.time() - start) * 1000)
 
 def kick_banned_user(user_id, chat_id):
@@ -528,11 +535,11 @@ class HelpHandler(BaseHTTPRequestHandler):
                 <li><b>!warn @пользователь [причина]</b> – выдать предупреждение</li>
                 <li><b>!unwarn @пользователь</b> – снять предупреждение</li>
                 <li><b>!addrole &lt;название&gt;</b> – создать новую роль</li>
-                <li><b>!delrole &lt;название&gt;</b> – удалить роль (если нет пользователей)</li>
-                <li><b>!editcmd &lt;роль&gt; &lt;право&gt; &lt;0/1&gt;</b> – разрешить/запретить команду для роли</li>
-                <li><b>!setrole @пользователь &lt;роль&gt;</b> – назначить роль пользователю</li>
-                <li><b>!roles</b> – список всех ролей и их прав</li>
-                <li><b>/stats [@пользователь]</b> – подробная информация о пользователе</li>
+                <li><b>!delrole &lt;название&gt;</b> – удалить роль</li>
+                <li><b>!editcmd &lt;роль&gt; &lt;право&gt; &lt;0/1&gt;</b> – разрешить/запретить команду</li>
+                <li><b>!setrole @пользователь &lt;роль&gt;</b> – назначить роль</li>
+                <li><b>!roles</b> – список ролей</li>
+                <li><b>/stats [@пользователь]</b> – информация о пользователе</li>
                 <li><b>/mtop</b> – топ по сообщениям</li>
                 <li><b>/баланс</b> – баланс в рублях</li>
                 <li><b>/евро</b> – баланс в евро</li>
@@ -543,7 +550,7 @@ class HelpHandler(BaseHTTPRequestHandler):
                 <li><b>/продатьраба @пользователь</b> – продать раба</li>
                 <li><b>/цепи @пользователь</b> – защитить раба цепями</li>
                 <li><b>/agent</b> – список агентов. /agent menu – меню управления правами</li>
-                <li><b>/quest</b> – список доступных квестов</li>
+                <li><b>/quest</b> – список квестов</li>
                 <li><b>/репорт &lt;текст&gt;</b> – создать тикет</li>
                 <li><b>/ответ &lt;id&gt; &lt;текст&gt;</b> – ответить на тикет</li>
                 <li><b>/start</b> – активировать текущую беседу</li>
@@ -572,11 +579,6 @@ def handle_command(event, text):
     user_id = event.user_id
     chat_id = event.peer_id
     if chat_id <= 2000000000:
-        return
-
-    # Проверка активации беседы
-    if not is_chat_active(chat_id) and not text.startswith("/start"):
-        send_message(chat_id, "Беседа не активирована. Используйте /start для активации.", reply_to=event.message_id)
         return
 
     if is_banned(user_id, chat_id):
@@ -917,6 +919,10 @@ def handle_command(event, text):
         msg = f"📊 Статистика бота\n⏱ Uptime: {uptime_str}\n📨 Среднее время запроса: {avg_req:.2f} мс\n⚙ Среднее время команды: {avg_cmd:.2f} мс"
         send_message(chat_id, msg, reply_to=event.message_id)
 
+    elif command == "/help":
+        help_url = f"http://127.0.0.1:{WEB_PORT}/help"
+        send_message(chat_id, f"Список команд: {help_url}", reply_to=event.message_id)
+
     # ===== СТАРЫЕ КОМАНДЫ =====
     elif command == "!editcmd":
         if not has_permission(user_id, chat_id, "editcmd"):
@@ -1095,15 +1101,12 @@ def handle_command(event, text):
             msg += f"{role_name}: {perms_str}\n"
         send_message(chat_id, msg, reply_to=event.message_id)
 
-    elif command == "/help":
-        help_url = f"http://127.0.0.1:{WEB_PORT}/help"
-        send_message(chat_id, f"Список команд: {help_url}", reply_to=event.message_id)
-
-# ========== ОСНОВНОЙ ЦИКЛ С АВТОПЕРЕЗАПУСКОМ ==========
+# ========== ОСНОВНОЙ ЦИКЛ ==========
 def main():
     print("🤖 Бот запущен!")
     print(f"📊 Веб-сервер на порту {WEB_PORT}")
     print("🔄 Ожидание сообщений...")
+    print("💡 При добавлении бота в беседу будет отправлено приветствие")
     
     last_ping = time.time()
     
@@ -1120,20 +1123,60 @@ def main():
                 elif event.type == VkEventType.USER_JOIN:
                     chat_id = event.peer_id
                     user_id = event.user_id
-                    if is_banned(user_id, chat_id):
-                        kick_banned_user(user_id, chat_id)
+                    
+                    # Проверяем, это бот добавлен или пользователь
+                    if user_id == -GROUP_ID or user_id == int(str(GROUP_ID)):
+                        # Бота добавили в беседу
+                        print(f"✅ Бот добавлен в беседу {chat_id}")
+                        
+                        # Создаём клавиатуру с кнопкой "НАЧАТЬ"
+                        keyboard = VkKeyboard(one_time=True)
+                        keyboard.add_button("НАЧАТЬ", color=VkKeyboardColor.POSITIVE)
+                        
+                        # Отправляем приветствие
+                        welcome_msg = "🤖 Привет! Я бот-менеджер чата.\n\n"
+                        welcome_msg += "⚠️ Для корректной работы мне нужны права администратора!\n"
+                        welcome_msg += "🔧 Пожалуйста, выдайте мне права:\n"
+                        welcome_msg += "• Управление сообщениями\n"
+                        welcome_msg += "• Удаление сообщений\n"
+                        welcome_msg += "• Исключение участников\n\n"
+                        welcome_msg += "✅ После выдачи прав нажмите кнопку НАЧАТЬ или напишите /start"
+                        
+                        send_message(chat_id, welcome_msg, keyboard=keyboard)
                     else:
-                        c.execute("SELECT 1 FROM users WHERE user_id=? AND chat_id=?", (user_id, chat_id))
-                        if not c.fetchone():
-                            add_user(user_id, chat_id)
-                            now = int(time.time())
-                            c.execute("UPDATE users SET joined_at=? WHERE user_id=? AND chat_id=?", (now, user_id, chat_id))
-                            conn.commit()
+                        # Обычный пользователь зашёл в беседу
+                        if is_banned(user_id, chat_id):
+                            kick_banned_user(user_id, chat_id)
+                        else:
+                            c.execute("SELECT 1 FROM users WHERE user_id=? AND chat_id=?", (user_id, chat_id))
+                            if not c.fetchone():
+                                add_user(user_id, chat_id)
+                                now = int(time.time())
+                                c.execute("UPDATE users SET joined_at=? WHERE user_id=? AND chat_id=?", (now, user_id, chat_id))
+                                conn.commit()
                 
                 elif event.type == VkEventType.MESSAGE_EVENT:
                     if event.payload:
                         payload = json.loads(event.payload)
-                        if payload.get("cmd") == "give_vip":
+                        
+                        # Обработка нажатия кнопки "НАЧАТЬ"
+                        if payload.get("cmd") == "start":
+                            chat_id = event.peer_id
+                            user_id = event.user_id
+                            
+                            if is_chat_active(chat_id):
+                                send_message(chat_id, "✅ Беседа уже активирована!")
+                            else:
+                                activate_chat(chat_id, user_id)
+                                send_message(chat_id, f"✅ Беседа активирована! Владелец: [id{user_id}|].\nИспользуйте /help для списка команд.")
+                            
+                            vk.messages.sendMessageEventAnswer(
+                                event_id=event.event_id,
+                                peer_id=event.peer_id,
+                                user_id=event.user_id,
+                                event_data=json.dumps({"type": "show_snackbar", "text": "Активация выполнена!"})
+                            )
+                        elif payload.get("cmd") == "give_vip":
                             target_id = payload.get("user_id")
                             if target_id:
                                 vip_until = int(time.time()) + 7 * 86400
@@ -1160,13 +1203,15 @@ def main():
                         elif payload.get("cmd") == "back_to_roles":
                             send_roles_menu(event.peer_id, event.user_id)
                 
-                # Keepalive - каждые 5 секунд выводим точку в консоль (для хостинга)
+                # Keepalive
                 if time.time() - last_ping > 5:
                     print(".", end="", flush=True)
                     last_ping = time.time()
                     
         except Exception as e:
             print(f"\n❌ Ошибка: {e}")
+            import traceback
+            traceback.print_exc()
             print("🔄 Перезапуск через 5 секунд...")
             time.sleep(5)
             continue
