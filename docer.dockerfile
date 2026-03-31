@@ -9,4 +9,4 @@ COPY . .
 
 RUN mkdir -p /app/data && chmod 777 /app/data
 
-CMD ["python", "бот 1.0.py"]
+CMD ["python", "bot.py"]
