@@ -2470,9 +2470,11 @@ class VKChatManager:
                 traceback.print_exc()
 
 
+import os
+
 if __name__ == "__main__":
-    GROUP_TOKEN = "vk1.a.KA15ljp23_4l6s3DomdeTkkE7DHmsflVzVWGMjBm7kzWm0eOATiZI_LTGXlzC2nnRHx3fcgjVivrqwUq5WUQN-7tfecpSfGfjjrhprbxh9B7WdUgpZ9sgKo5bYpLSzKmuahc3Ylf3Zysct7yvMch0FGoECKYe6gSGBerNJKsDIbAlndr9HzLcMojM7ePA5GdkZUCA4ICcV7ttTSHnqZUzQ"
-    GROUP_ID = 237250582
+    GROUP_TOKEN = os.getenv("VK_TOKEN", "токен_по_умолчанию")
+    GROUP_ID = int(os.getenv("VK_GROUP_ID", "0"))
        
     bot = VKChatManager(GROUP_TOKEN, GROUP_ID)
     bot.run()
